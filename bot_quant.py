@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 # ==============================================================================
 # APEX QUANT HOCKEY (NHL)
@@ -278,10 +278,10 @@ def jornada_de(utc):
     return (utc.astimezone(TZ_MADRID) - timedelta(hours=12)).date()
 
 
-def obtener_partidos(desde, hasta):
+def obtener_partidos(desde, hasta, rangos_ok=True):
     partidos = {}
-    lote = espn_rango(desde, hasta)
-    if lote is None:   # si el rango falla, día a día
+    lote = espn_rango(desde, hasta) if rangos_ok else None
+    if lote is None:   # si el rango falla (o ESPN no los admite), día a día
         lote = []
         d = desde
         while d <= hasta:
@@ -340,21 +340,31 @@ def registrar_partido(eq, m):
 
 
 def rellenar_historial(eq, hoy):
-    """La primera vez descarga los últimos ~400 días (temporada actual y anterior) en tramos de 20 días."""
+    """La primera vez descarga los últimos ~400 días (temporada actual y anterior).
+    Prueba tramos de 20 días; si ESPN no los acepta (da error 400), va día a día (v1.1)."""
     est = eq["estado"]
     cursor = datetime.fromisoformat(est.get("cursor") or (hoy - timedelta(days=DIAS_HISTORIAL)).isoformat()).date()
-    nuevos, tramos = 0, 0
-    while cursor < hoy and tiempo_usado() < TIEMPO_MAX_DESCARGAS * 0.7:
-        fin = min(cursor + timedelta(days=19), hoy - timedelta(days=1))
-        lote = espn_rango(cursor, fin)
-        if lote is None:
-            break   # se reintenta en el siguiente ciclo desde el mismo día
+    nuevos, peticiones, fallos = 0, 0, 0
+    while cursor < hoy and tiempo_usado() < TIEMPO_MAX_DESCARGAS * 0.7 and fallos < 5:
+        if est.get("rangos") != "no":
+            fin = min(cursor + timedelta(days=19), hoy - timedelta(days=1))
+            lote = espn_rango(cursor, fin)
+            if lote is None:
+                est["rangos"] = "no"      # ESPN no admite tramos: a partir de ahora, día a día
+                continue
+        else:
+            fin = cursor
+            lote = espn_rango(cursor, cursor)
+            if lote is None:
+                fallos += 1
+                time.sleep(1)
+                continue                  # se reintenta el mismo día (máx. 5 fallos por ciclo)
         nuevos += sum(1 for m in lote if registrar_partido(eq, m))
         cursor = fin + timedelta(days=1)
-        tramos += 1
+        peticiones += 1
     est["cursor"] = cursor.isoformat()
-    if tramos:
-        print(f"   📚 Historial ESPN: {tramos} tramos (+{nuevos} partidos) · al día hasta {cursor}")
+    if peticiones:
+        print(f"   📚 Historial ESPN: {peticiones} peticiones (+{nuevos} partidos) · al día hasta {cursor}")
     return nuevos
 
 
@@ -779,7 +789,7 @@ def ejecutar_ciclo():
     rellenar_historial(eq, jornada_actual)
     lunes = date.fromisoformat(lunes_semana_str)
     desde = (lunes - timedelta(days=1)) if not partidos_previos else max(lunes - timedelta(days=1), jornada_actual - timedelta(days=2))
-    calendario = obtener_partidos(desde, jornada_actual + timedelta(days=2))
+    calendario = obtener_partidos(desde, jornada_actual + timedelta(days=2), eq["estado"].get("rangos") != "no")
     for m in sorted(calendario, key=lambda x: x.get("utcDate") or ""):
         registrar_partido(eq, m)
     fuerzas = calcular_fuerzas(eq, jornada_actual)
