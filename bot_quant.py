@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 # ==============================================================================
 # APEX QUANT HOCKEY (NHL)
@@ -240,6 +240,52 @@ def parsear_scoreboard(data):
         except Exception as e:
             print(f"   Aviso partido ESPN: {e}")
     return salida
+
+
+ESPN_RESUMEN = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/summary"
+HORAS_ATASCADO = 6      # más de 6 h «en juego» -> ESPN se ha quedado colgado con ese partido
+HORAS_ANULAR = 48       # más de 48 h sin resultado -> se da por anulado (no cuenta)
+
+
+def espn_resumen(m):
+    """v1.2: ficha completa de un partido (a veces tiene el final aunque el calendario siga «en juego»)."""
+    data, st = http_json(ESPN_RESUMEN, {"event": m["id"].replace("nhl", "")})
+    if not data:
+        print(f"   ⚠️ ESPN ficha {m['id']}: HTTP {st}")
+        return None
+    try:
+        comp = ((data.get("header") or {}).get("competitions") or [{}])[0]
+        ev = {"id": m["id"].replace("nhl", ""), "date": comp.get("date") or m.get("utcDate"),
+              "season": (data.get("header") or {}).get("season") or {},
+              "competitions": [comp]}
+        r = parsear_scoreboard({"events": [ev]})
+        return r[0] if r else None
+    except Exception as e:
+        print(f"   Aviso ficha ESPN {m['id']}: {e}")
+        return None
+
+
+def revisar_atascados(calendario, ahora_utc):
+    """Partidos que ESPN sigue dando «en juego» horas después de empezar."""
+    for i, m in enumerate(calendario):
+        utc = _fecha_utc(m.get("utcDate"))
+        if not utc or m.get("status") not in ("IN_PLAY", "TIMED"):
+            continue
+        horas = (ahora_utc - utc).total_seconds() / 3600
+        if horas < HORAS_ATASCADO:
+            continue
+        nuevo = espn_resumen(m)
+        if nuevo and nuevo.get("status") == "FINISHED" and nuevo.get("reg"):
+            print(f"   🔧 {m['local']['short']} - {m['visit']['short']}: final sacado de la ficha ({nuevo['goles']})")
+            nuevo["local"], nuevo["visit"] = m["local"], m["visit"]
+            calendario[i] = nuevo
+            continue
+        if horas >= HORAS_ANULAR:
+            m["status"], m["detalle"] = "POSTPONED", "Sin resultado de ESPN (anulado)"
+            print(f"   ↩️ {m['local']['short']} - {m['visit']['short']}: {round(horas)} h sin resultado -> anulado")
+        else:
+            m["status"], m["detalle"] = "PENDING_RESULT", "ESPN no ha dado el resultado"
+            print(f"   ⏳ {m['local']['short']} - {m['visit']['short']}: {round(horas)} h sin resultado")
 
 
 def espn_rango(desde, hasta):
@@ -790,6 +836,7 @@ def ejecutar_ciclo():
     lunes = date.fromisoformat(lunes_semana_str)
     desde = (lunes - timedelta(days=1)) if not partidos_previos else max(lunes - timedelta(days=1), jornada_actual - timedelta(days=2))
     calendario = obtener_partidos(desde, jornada_actual + timedelta(days=2), eq["estado"].get("rangos") != "no")
+    revisar_atascados(calendario, ahora_utc)
     for m in sorted(calendario, key=lambda x: x.get("utcDate") or ""):
         registrar_partido(eq, m)
     fuerzas = calcular_fuerzas(eq, jornada_actual)
@@ -949,7 +996,7 @@ def ejecutar_ciclo():
         if not a.get("liquidada_telegram"):
             cab = f"🏒 <b>{a['partido']}</b>\n📌 <b>Pronóstico:</b> {a['mercado']}\n"
             if es_push:
-                cuerpo = "↩️ <b>Resultado:</b> ANULADA (partido aplazado o cancelado)\n\n⚡ <i>Apex Quant Engine</i>"
+                cuerpo = "↩️ <b>Resultado:</b> ANULADA (partido aplazado, cancelado o sin resultado)\n\n⚡ <i>Apex Quant Engine</i>"
             elif res:
                 cuerpo = (f"✅ <b>Resultado:</b> ACERTADO\n🏁 <b>Marcador final:</b> {a['marcador_final'] or 'Final'}\n"
                           f"💰 <b>Cuota mínima:</b> {a['cuota']} (justa @{float(a.get('cuota_justa') or 0):.2f})\n💡 <b>Stake:</b> {a['stake']}\n\n"
