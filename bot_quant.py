@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, timezone, timedelta, date
 from zoneinfo import ZoneInfo
 
-VERSION = "1.2"
+VERSION = "1.2.1"
 
 # ==============================================================================
 # APEX QUANT HOCKEY (NHL)
@@ -866,8 +866,8 @@ def ejecutar_ciclo():
             marcador += " (" + ("prórroga" if m["tipo_final"] == "OT" else "penaltis") + ")"
         info = {"id": m["id"], "estado": estado, "reg": m.get("reg"), "ganador": m.get("ganador"), "marcador": marcador}
         mapa_por_id[m["id"]] = info
-        if jornada.isoformat() < lunes_semana_str and fecha_p < lunes_semana_str:
-            continue
+        if jornada.isoformat() < (lunes - timedelta(days=1)).isoformat():
+            continue   # se conservan también los de la noche del domingo anterior (v1.2.1)
 
         prev = previos_map.get(m["id"]) or {}
         modelo = prev.get("modelo") if prev.get("analizado") else None
